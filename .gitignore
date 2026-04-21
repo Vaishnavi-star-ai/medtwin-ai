@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+server/public/
+client/dist/
+
+# Environment files
+.env
+server/.env
+
+# Firebase keys
+server/serviceAccountKey.json
+server/key.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Uploads
+server/uploads/*
+!server/uploads/.gitkeep
+
+# Zip
+*.zip
