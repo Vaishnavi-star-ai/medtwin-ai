@@ -84,13 +84,75 @@ async function extractTextFromFile(targetPath) {
             return allText.trim() || 'No data found in spreadsheet.';
         }
 
-        // Images (OCR)
+
+        // Images — use Groq Vision AI (reads handwritten text!) or Tesseract fallback
         if (['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.tif', '.gif'].includes(ext)) {
-            if (!Tesseract) throw new Error('tesseract.js not installed');
-            console.log(`🔍 Running OCR on ${path.basename(targetPath)}...`);
-            const { data: { text } } = await Tesseract.recognize(targetPath, 'eng');
-            if (!text || text.trim().length < 5) throw new Error('OCR could not extract text from image. Try a clearer image.');
-            return text.trim();
+            console.log(`🔍 Processing image: ${path.basename(targetPath)}...`);
+
+            // PRIORITY 1: Groq Vision AI (reads handwriting!)
+            const apiKey = process.env.GROQ_API_KEY;
+            console.log(`🔑 Vision check: apiKey=${apiKey ? 'YES' : 'NO'}, OpenAI=${OpenAI ? 'YES' : 'NO'}`);
+            if (apiKey && OpenAI) {
+                try {
+                    console.log('🤖 Using Groq Vision AI for image analysis...');
+                    const imageBuffer = fs.readFileSync(targetPath);
+                    const base64Image = imageBuffer.toString('base64');
+                    const mimeType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+
+                    const openai = new OpenAI({ apiKey, baseURL: "https://api.groq.com/openai/v1" });
+                    const response = await openai.chat.completions.create({
+                        model: "meta-llama/llama-4-scout-17b-16e-instruct",
+                        messages: [{
+                            role: "user",
+                            content: [
+                                {
+                                    type: "text",
+                                    text: "This is a medical report image (may be handwritten). Extract ALL text, numbers, and values exactly as written. For each medical parameter, write it as 'Parameter: Value Unit'. Include ALL numbers you see. Be very precise with numbers."
+                                },
+                                {
+                                    type: "image_url",
+                                    image_url: { url: `data:${mimeType};base64,${base64Image}` }
+                                }
+                            ]
+                        }],
+                        temperature: 0.1,
+                        max_tokens: 2000,
+                    });
+
+                    const visionText = response.choices[0].message.content.trim();
+                    if (visionText && visionText.length > 10) {
+                        console.log(`✅ Groq Vision extracted ${visionText.length} chars`);
+                        return visionText;
+                    }
+                } catch (err) {
+                    console.log(`⚠️ Groq Vision failed: ${err.message}. Falling back to OCR...`);
+                }
+            }
+
+            // PRIORITY 2: Tesseract OCR fallback (works for printed text only)
+            if (!Tesseract) throw new Error('For handwritten reports, please set GROQ_API_KEY in your .env file. Tesseract OCR only works with printed text.');
+
+            let bestText = '';
+            const configs = [{}, { tessedit_pageseg_mode: '6' }, { tessedit_pageseg_mode: '4' }];
+            for (const config of configs) {
+                try {
+                    const { data: { text } } = await Tesseract.recognize(targetPath, 'eng', config);
+                    if (text && text.trim().length > bestText.length) bestText = text.trim();
+                } catch {}
+            }
+
+            // Post-process OCR text
+            bestText = bestText
+                .replace(/[|!]/g, 'l')
+                .replace(/(\d)\s*[oO]\s/g, '$1.0 ')
+                .replace(/(\d)\s*,\s*(\d)/g, '$1.$2');
+
+            if (!bestText || bestText.length < 5) {
+                throw new Error('Could not read this image. For handwritten reports, set GROQ_API_KEY in your .env file for AI-powered handwriting recognition.');
+            }
+
+            console.log(`📝 OCR extracted ${bestText.length} chars`);
+            return bestText;
         }
 
         // Plain Text
@@ -140,26 +202,31 @@ async function extractTextFromFile(targetPath) {
 // ==========================================
 // 3. AI REPORT ANALYSIS
 // ==========================================
-async function analyzeReport(sessionId, text) {
+async function analyzeReport(sessionId, text, vitals = []) {
     const session = getSession(sessionId);
-    const safeText = text.length > 14000 ? text.substring(0, 14000) + "\n\n[TEXT TRUNCATED]" : text;
+    const safeText = text.length > 4000 ? text.substring(0, 4000) + "\n\n[TEXT TRUNCATED]" : text;
     session.lastReportText = safeText;
     session.chatHistory = [];
 
-    const prompt = `Analyze the following medical report. List all vital metrics found. For every metric, output one clean line:
-Your [metric] is [status]. [Optional short advice].
+    // Build vitals summary for prompt
+    let vitalsSummary = '';
+    if (vitals && vitals.length > 0) {
+        vitalsSummary = '\n\nExtracted Vitals:\n' + vitals.map(v =>
+            `${v.name}: ${v.value} ${v.unit} (Normal: ${v.normalRange}) — Status: ${v.status.toUpperCase()}`
+        ).join('\n');
+    }
 
-Example:
-Your hemoglobin is low. Consider iron-rich foods.
-Your cholesterol is high. Lifestyle changes recommended.
+    const prompt = `Analyze this medical report. For EACH metric/value found in the report, write a specific line referencing the ACTUAL value.
+Format: Your [metric] is [actual value] [unit] which is [status]. [Specific advice based on the value].
 
-Do not use bullet points, asterisks, or formatting. Just clean text lines.
+IMPORTANT: Use the REAL numbers from the report. Do NOT give generic advice.
+${vitalsSummary}
 
 Medical Report:
 ${safeText}`;
 
     return await callAI([
-        { role: "system", content: "You are a helpful medical AI assistant. Be concise and reassuring." },
+        { role: "system", content: "You are a medical AI. Give specific analysis referencing actual values from the report. Never give generic advice — always cite the patient's real numbers." },
         { role: "user", content: prompt }
     ]);
 }
@@ -200,7 +267,7 @@ async function callAI(messages) {
     try {
         const openai = new OpenAI({ apiKey, baseURL: "https://api.groq.com/openai/v1" });
         const response = await openai.chat.completions.create({
-            model: "llama-3.1-8b-instant",
+            model: "meta-llama/llama-4-scout-17b-16e-instruct",
             messages,
             temperature: 0.3,
             max_tokens: 2000,
@@ -270,68 +337,105 @@ function generateLocalAnalysis(messages) {
         return "I'm MedTwin AI, your health assistant! I can help you with:\n\n• Health and wellness questions\n• Understanding symptoms\n• Medication information\n• Diet and nutrition tips\n• Exercise recommendations\n\nTry asking me about headaches, fever, diabetes, blood pressure, sleep, vitamins, or upload a medical report for detailed analysis!\n\nNote: For accurate AI analysis, set your GROQ_API_KEY in the server .env file.";
     }
 
-    // Extract medical terms and generate analysis
+    // Extract ACTUAL values and generate specific analysis
     const findings = [];
+    const t = userMsg.replace(/\n/g, ' ');
 
-    // Blood metrics
-    if (text.includes('hemoglobin') || text.includes('hgb') || text.includes('hb')) {
-        if (text.match(/hemoglobin.*?(low|below|decreased|<\s*12)/i)) findings.push('Your hemoglobin is low. Consider iron-rich foods like spinach, lentils, and red meat.');
-        else if (text.match(/hemoglobin.*?(high|above|elevated|>\s*17)/i)) findings.push('Your hemoglobin is elevated. Stay hydrated and consult your doctor.');
-        else findings.push('Your hemoglobin levels were detected in the report. Please verify with your physician.');
-    }
+    // Helper to extract a value
+    const getVal = (regex) => { const m = t.match(regex); return m ? parseFloat(m[1]) : null; };
 
-    if (text.includes('cholesterol') || text.includes('ldl') || text.includes('hdl')) {
-        if (text.match(/cholesterol.*?(high|elevated|above|>\s*200)/i) || text.match(/(high|elevated).*?cholesterol/i)) findings.push('Your cholesterol is high. Consider dietary changes and regular exercise.');
-        else findings.push('Your cholesterol levels are noted. Maintain a balanced diet.');
-    }
-
-    if (text.includes('glucose') || text.includes('sugar') || text.includes('hba1c') || text.includes('diabetes')) {
-        if (text.match(/(high|elevated|above).*?(glucose|sugar|hba1c)/i) || text.match(/(glucose|sugar|hba1c).*?(high|elevated|above)/i)) findings.push('Your blood sugar is elevated. Monitor carbohydrate intake and consider regular exercise.');
-        else findings.push('Your blood sugar levels are noted in the report.');
+    // Hemoglobin
+    const hb = getVal(/hemoglobin[:\s]*(\d+\.?\d*)/i) || getVal(/hgb[:\s]*(\d+\.?\d*)/i) || getVal(/hb[:\s]*(\d+\.?\d*)/i);
+    if (hb !== null) {
+      if (hb < 12) findings.push(`Your Hemoglobin is ${hb} g/dL which is LOW (Normal: 12-17 g/dL). You may have anemia. Eat iron-rich foods like spinach, lentils, red meat, and dates. Consider an iron supplement after consulting your doctor.`);
+      else if (hb > 17) findings.push(`Your Hemoglobin is ${hb} g/dL which is HIGH (Normal: 12-17 g/dL). This could indicate dehydration or polycythemia. Stay well hydrated and consult your doctor.`);
+      else findings.push(`Your Hemoglobin is ${hb} g/dL which is NORMAL (Normal: 12-17 g/dL). Your oxygen-carrying capacity is healthy.`);
     }
 
-    if (text.includes('blood pressure') || text.includes('bp') || text.includes('systolic') || text.includes('diastolic') || text.includes('hypertension')) {
-        if (text.match(/(high|elevated).*?(bp|blood pressure|systolic)/i) || text.includes('hypertension')) findings.push('Your blood pressure appears elevated. Reduce sodium intake and manage stress levels.');
-        else findings.push('Your blood pressure readings are noted.');
+    // Cholesterol
+    const chol = getVal(/(?:total\s*)?cholesterol[:\s]*(\d+\.?\d*)/i);
+    if (chol !== null) {
+      if (chol > 200) findings.push(`Your Total Cholesterol is ${chol} mg/dL which is HIGH (Normal: <200 mg/dL). Reduce saturated fats, exercise regularly, and consider statin therapy if advised by your doctor.`);
+      else findings.push(`Your Total Cholesterol is ${chol} mg/dL which is NORMAL (Normal: <200 mg/dL). Keep maintaining a heart-healthy diet.`);
     }
 
-    if (text.includes('creatinine') || text.includes('kidney') || text.includes('renal')) {
-        findings.push('Your kidney function markers are noted. Stay well hydrated.');
-    }
-    if (text.includes('thyroid') || text.includes('tsh') || text.includes('t3') || text.includes('t4')) {
-        findings.push('Your thyroid markers are present in the report. Follow up with an endocrinologist if needed.');
-    }
-    if (text.includes('platelet') || text.includes('wbc') || text.includes('rbc') || text.includes('cbc') || text.includes('blood count')) {
-        findings.push('Your complete blood count (CBC) values are noted. These should be reviewed in context.');
-    }
-    if (text.includes('vitamin') || text.includes('calcium') || text.includes('iron')) {
-        findings.push('Your vitamin and mineral levels are noted. Consider supplementation if deficient.');
-    }
-    if (text.includes('liver') || text.includes('sgpt') || text.includes('sgot') || text.includes('alt') || text.includes('ast') || text.includes('bilirubin')) {
-        findings.push('Your liver function markers are present. Avoid alcohol and fatty foods.');
-    }
-    if (text.includes('uric acid') || text.includes('urea')) {
-        findings.push('Your uric acid/urea levels are noted. Stay hydrated and limit purine-rich foods.');
+    // Blood Sugar
+    const sugar = getVal(/(?:fasting|glucose|sugar|fbs)[:\s]*(\d+\.?\d*)/i);
+    if (sugar !== null) {
+      if (sugar > 126) findings.push(`Your Fasting Blood Sugar is ${sugar} mg/dL which is HIGH (Normal: 70-100 mg/dL). This indicates diabetes. Monitor carbs, exercise daily, and follow your doctor's medication plan.`);
+      else if (sugar > 100) findings.push(`Your Fasting Blood Sugar is ${sugar} mg/dL which is ELEVATED (Normal: 70-100 mg/dL). This is pre-diabetic range. Reduce sugar intake and increase physical activity.`);
+      else if (sugar < 70) findings.push(`Your Fasting Blood Sugar is ${sugar} mg/dL which is LOW (Normal: 70-100 mg/dL). Eat regular meals and carry glucose tablets.`);
+      else findings.push(`Your Fasting Blood Sugar is ${sugar} mg/dL which is NORMAL (Normal: 70-100 mg/dL). Good glycemic control.`);
     }
 
-    // If we found specific metrics
+    // HbA1c
+    const hba1c = getVal(/hba1c[:\s]*(\d+\.?\d*)/i);
+    if (hba1c !== null) {
+      if (hba1c > 6.5) findings.push(`Your HbA1c is ${hba1c}% which is HIGH (Normal: <5.7%). This indicates poorly controlled diabetes over the past 3 months. Strict dietary control and medication review needed.`);
+      else if (hba1c > 5.7) findings.push(`Your HbA1c is ${hba1c}% which is ELEVATED (Normal: <5.7%). Pre-diabetic range. Lifestyle changes recommended.`);
+      else findings.push(`Your HbA1c is ${hba1c}% which is NORMAL (Normal: <5.7%). Good long-term sugar control.`);
+    }
+
+    // Blood Pressure
+    const bpMatch = t.match(/(?:blood\s*pressure|bp|systolic)[:\s/]*(\d{2,3})\s*[/\\]\s*(\d{2,3})/i) || t.match(/(\d{2,3})\s*[/\\]\s*(\d{2,3})\s*(?:mm\s*hg|mmhg)/i);
+    if (bpMatch) {
+      const sys = parseInt(bpMatch[1]), dia = parseInt(bpMatch[2]);
+      if (sys > 140 || dia > 90) findings.push(`Your Blood Pressure is ${sys}/${dia} mmHg which is HIGH (Normal: <140/90 mmHg). Reduce salt, exercise, manage stress, and take prescribed antihypertensives.`);
+      else if (sys < 90 || dia < 60) findings.push(`Your Blood Pressure is ${sys}/${dia} mmHg which is LOW (Normal: 90-140/60-90 mmHg). Stay hydrated, eat small frequent meals, and avoid sudden posture changes.`);
+      else findings.push(`Your Blood Pressure is ${sys}/${dia} mmHg which is NORMAL (Normal: <140/90 mmHg). Heart health looks good.`);
+    }
+
+    // Creatinine
+    const creat = getVal(/creatinine[:\s]*(\d+\.?\d*)/i);
+    if (creat !== null) {
+      if (creat > 1.2) findings.push(`Your Creatinine is ${creat} mg/dL which is HIGH (Normal: 0.6-1.2 mg/dL). This may indicate kidney stress. Stay hydrated and consult a nephrologist.`);
+      else findings.push(`Your Creatinine is ${creat} mg/dL which is NORMAL (Normal: 0.6-1.2 mg/dL). Kidney function appears healthy.`);
+    }
+
+    // TSH
+    const tsh = getVal(/tsh[:\s]*(\d+\.?\d*)/i);
+    if (tsh !== null) {
+      if (tsh > 4.0) findings.push(`Your TSH is ${tsh} mIU/L which is HIGH (Normal: 0.4-4.0 mIU/L). This suggests hypothyroidism. Consult an endocrinologist for thyroid medication.`);
+      else if (tsh < 0.4) findings.push(`Your TSH is ${tsh} mIU/L which is LOW (Normal: 0.4-4.0 mIU/L). This may indicate hyperthyroidism. Follow up with an endocrinologist.`);
+      else findings.push(`Your TSH is ${tsh} mIU/L which is NORMAL (Normal: 0.4-4.0 mIU/L). Thyroid function is healthy.`);
+    }
+
+    // Vitamin D
+    const vitD = getVal(/vitamin\s*d[:\s]*(\d+\.?\d*)/i);
+    if (vitD !== null) {
+      if (vitD < 20) findings.push(`Your Vitamin D is ${vitD} ng/mL which is DEFICIENT (Normal: 30-100 ng/mL). Take Vitamin D3 supplements (60,000 IU weekly) and get 15-20 min sunlight daily.`);
+      else if (vitD < 30) findings.push(`Your Vitamin D is ${vitD} ng/mL which is INSUFFICIENT (Normal: 30-100 ng/mL). Increase sun exposure and consider supplementation.`);
+      else findings.push(`Your Vitamin D is ${vitD} ng/mL which is NORMAL (Normal: 30-100 ng/mL). Good vitamin D levels.`);
+    }
+
+    // LDL
+    const ldl = getVal(/ldl[:\s]*(\d+\.?\d*)/i);
+    if (ldl !== null) {
+      if (ldl > 100) findings.push(`Your LDL (bad cholesterol) is ${ldl} mg/dL which is HIGH (Normal: <100 mg/dL). Avoid fried foods, exercise 30 min daily, and consider medication if very high.`);
+      else findings.push(`Your LDL is ${ldl} mg/dL which is NORMAL (Normal: <100 mg/dL). Good cholesterol management.`);
+    }
+
+    // SGPT/ALT
+    const sgpt = getVal(/(?:sgpt|alt)[:\s]*(\d+\.?\d*)/i);
+    if (sgpt !== null) {
+      if (sgpt > 56) findings.push(`Your SGPT/ALT is ${sgpt} U/L which is HIGH (Normal: 7-56 U/L). This indicates liver stress. Avoid alcohol, reduce fatty foods, and consult a gastroenterologist.`);
+      else findings.push(`Your SGPT/ALT is ${sgpt} U/L which is NORMAL (Normal: 7-56 U/L). Liver function is healthy.`);
+    }
+
+    // Uric Acid
+    const uric = getVal(/uric\s*acid[:\s]*(\d+\.?\d*)/i);
+    if (uric !== null) {
+      if (uric > 7.2) findings.push(`Your Uric Acid is ${uric} mg/dL which is HIGH (Normal: 3.5-7.2 mg/dL). Risk of gout. Stay hydrated, reduce purine-rich foods (red meat, shellfish), and limit alcohol.`);
+      else findings.push(`Your Uric Acid is ${uric} mg/dL which is NORMAL (Normal: 3.5-7.2 mg/dL).`);
+    }
+
     if (findings.length > 0) {
-        return findings.join('\n') + '\n\nNote: This is an automated preliminary analysis. Please consult your healthcare provider for accurate medical interpretation.';
+        return findings.join('\n\n') + '\n\nNote: This analysis is based on actual values extracted from your report. Please consult your healthcare provider for clinical interpretation.';
     }
 
-    // Generic analysis for any text content
+    // Generic fallback if no specific values found
     const wordCount = userMsg.split(/\s+/).length;
-    return `Medical Report Analysis Summary
-
-Document processed successfully (${wordCount} words analyzed).
-
-The report contains medical information that has been extracted and stored for reference.
-
-Key observations from the document text have been noted. For detailed interpretation of specific values and metrics, please consult with your healthcare provider.
-
-You can now use the AI Chat feature to ask specific questions about this report.
-
-Note: This is an automated analysis. Always verify findings with a qualified medical professional.`;
+    return `Report processed (${wordCount} words). The document was scanned but no standard lab values (hemoglobin, cholesterol, blood sugar, etc.) could be automatically extracted.\n\nThis may happen with:\n- Handwritten reports (OCR may miss values)\n- Non-standard formatting\n- Reports in regional languages\n\nTip: For best results, upload a typed/printed lab report in PDF format. You can also ask specific questions about this report in the AI Chat.`;
 }
 
 // ==========================================
@@ -339,34 +443,42 @@ Note: This is an automated analysis. Always verify findings with a qualified med
 // ==========================================
 function extractVitals(text) {
     const vitals = [];
-    const t = text.replace(/\n/g, ' ');
+    // Normalize OCR noise: fix common misreads, collapse whitespace
+    let t = text.replace(/\n/g, ' ')
+        .replace(/[|!]/g, 'l')
+        .replace(/(\d)\s*[oO]\s/g, '$1.0 ')
+        .replace(/(\d)\s*,\s*(\d)/g, '$1.$2')
+        .replace(/\s+/g, ' ');
+
+    // Flexible separator: handles "Hb: 12", "Hb = 12", "Hb - 12", "Hb  12", "Hb12"
+    const SEP = '[:\\s=\\-–—~>./]*\\s*';
 
     const patterns = [
-        { name: 'Hemoglobin', unit: 'g/dL', regex: /hemoglobin[:\s]*(\d+\.?\d*)/i, normalMin: 12, normalMax: 17, icon: '🩸' },
-        { name: 'Blood Sugar (Fasting)', unit: 'mg/dL', regex: /(?:fasting|glucose|sugar|fbs)[:\s]*(\d+\.?\d*)/i, normalMin: 70, normalMax: 100, icon: '🍬' },
-        { name: 'HbA1c', unit: '%', regex: /hba1c[:\s]*(\d+\.?\d*)/i, normalMin: 4, normalMax: 5.7, icon: '📊' },
-        { name: 'Cholesterol (Total)', unit: 'mg/dL', regex: /(?:total\s*)?cholesterol[:\s]*(\d+\.?\d*)/i, normalMin: 0, normalMax: 200, icon: '💛' },
-        { name: 'LDL', unit: 'mg/dL', regex: /ldl[:\s]*(\d+\.?\d*)/i, normalMin: 0, normalMax: 100, icon: '⚠️' },
-        { name: 'HDL', unit: 'mg/dL', regex: /hdl[:\s]*(\d+\.?\d*)/i, normalMin: 40, normalMax: 200, icon: '💚' },
-        { name: 'Triglycerides', unit: 'mg/dL', regex: /triglycerides?[:\s]*(\d+\.?\d*)/i, normalMin: 0, normalMax: 150, icon: '📈' },
-        { name: 'Creatinine', unit: 'mg/dL', regex: /creatinine[:\s]*(\d+\.?\d*)/i, normalMin: 0.6, normalMax: 1.2, icon: '🫘' },
-        { name: 'Urea', unit: 'mg/dL', regex: /urea[:\s]*(\d+\.?\d*)/i, normalMin: 7, normalMax: 20, icon: '💧' },
-        { name: 'Uric Acid', unit: 'mg/dL', regex: /uric\s*acid[:\s]*(\d+\.?\d*)/i, normalMin: 3.5, normalMax: 7.2, icon: '🔬' },
-        { name: 'TSH', unit: 'mIU/L', regex: /tsh[:\s]*(\d+\.?\d*)/i, normalMin: 0.4, normalMax: 4.0, icon: '🦋' },
-        { name: 'Vitamin D', unit: 'ng/mL', regex: /vitamin\s*d[:\s]*(\d+\.?\d*)/i, normalMin: 30, normalMax: 100, icon: '☀️' },
-        { name: 'Vitamin B12', unit: 'pg/mL', regex: /(?:vitamin\s*)?b12[:\s]*(\d+\.?\d*)/i, normalMin: 200, normalMax: 900, icon: '💊' },
-        { name: 'Iron', unit: 'µg/dL', regex: /(?:serum\s*)?iron[:\s]*(\d+\.?\d*)/i, normalMin: 60, normalMax: 170, icon: '🔩' },
-        { name: 'Calcium', unit: 'mg/dL', regex: /calcium[:\s]*(\d+\.?\d*)/i, normalMin: 8.5, normalMax: 10.5, icon: '🦴' },
-        { name: 'Platelets', unit: 'K/µL', regex: /platelet[s]?[:\s]*(\d+\.?\d*)/i, normalMin: 150, normalMax: 400, icon: '🩹' },
-        { name: 'WBC', unit: 'K/µL', regex: /wbc[:\s]*(\d+\.?\d*)/i, normalMin: 4.5, normalMax: 11, icon: '⚪' },
-        { name: 'RBC', unit: 'M/µL', regex: /rbc[:\s]*(\d+\.?\d*)/i, normalMin: 4.5, normalMax: 5.5, icon: '🔴' },
-        { name: 'SGPT/ALT', unit: 'U/L', regex: /(?:sgpt|alt)[:\s]*(\d+\.?\d*)/i, normalMin: 7, normalMax: 56, icon: '🫁' },
-        { name: 'SGOT/AST', unit: 'U/L', regex: /(?:sgot|ast)[:\s]*(\d+\.?\d*)/i, normalMin: 10, normalMax: 40, icon: '🫁' },
-        { name: 'Bilirubin', unit: 'mg/dL', regex: /bilirubin[:\s]*(\d+\.?\d*)/i, normalMin: 0.1, normalMax: 1.2, icon: '🟡' },
+        { name: 'Hemoglobin', unit: 'g/dL', regex: new RegExp(`(?:h[ae]moglobin|hgb|h\\.?b)${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 12, normalMax: 17, icon: '🩸' },
+        { name: 'Blood Sugar (Fasting)', unit: 'mg/dL', regex: new RegExp(`(?:fasting|glucose|sugar|fbs|blood\\s*sugar)${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 70, normalMax: 100, icon: '🍬' },
+        { name: 'HbA1c', unit: '%', regex: new RegExp(`(?:hba1c|hb\\s*a1c|a1c|glycated)${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 4, normalMax: 5.7, icon: '📊' },
+        { name: 'Cholesterol (Total)', unit: 'mg/dL', regex: new RegExp(`(?:total\\s*)?cholesterol${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 0, normalMax: 200, icon: '💛' },
+        { name: 'LDL', unit: 'mg/dL', regex: new RegExp(`ldl${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 0, normalMax: 100, icon: '⚠️' },
+        { name: 'HDL', unit: 'mg/dL', regex: new RegExp(`hdl${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 40, normalMax: 200, icon: '💚' },
+        { name: 'Triglycerides', unit: 'mg/dL', regex: new RegExp(`triglycerides?${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 0, normalMax: 150, icon: '📈' },
+        { name: 'Creatinine', unit: 'mg/dL', regex: new RegExp(`creatinine${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 0.6, normalMax: 1.2, icon: '🫘' },
+        { name: 'Urea', unit: 'mg/dL', regex: new RegExp(`urea${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 7, normalMax: 20, icon: '💧' },
+        { name: 'Uric Acid', unit: 'mg/dL', regex: new RegExp(`uric\\s*acid${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 3.5, normalMax: 7.2, icon: '🔬' },
+        { name: 'TSH', unit: 'mIU/L', regex: new RegExp(`tsh${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 0.4, normalMax: 4.0, icon: '🦋' },
+        { name: 'Vitamin D', unit: 'ng/mL', regex: new RegExp(`(?:vitamin\\s*d|vit\\.?\\s*d)${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 30, normalMax: 100, icon: '☀️' },
+        { name: 'Vitamin B12', unit: 'pg/mL', regex: new RegExp(`(?:vitamin\\s*)?b\\s*12${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 200, normalMax: 900, icon: '💊' },
+        { name: 'Iron', unit: 'µg/dL', regex: new RegExp(`(?:serum\\s*)?iron${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 60, normalMax: 170, icon: '🔩' },
+        { name: 'Calcium', unit: 'mg/dL', regex: new RegExp(`calcium${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 8.5, normalMax: 10.5, icon: '🦴' },
+        { name: 'Platelets', unit: 'K/µL', regex: new RegExp(`platelets?${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 150, normalMax: 400, icon: '🩹' },
+        { name: 'WBC', unit: 'K/µL', regex: new RegExp(`wbc${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 4.5, normalMax: 11, icon: '⚪' },
+        { name: 'RBC', unit: 'M/µL', regex: new RegExp(`rbc${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 4.5, normalMax: 5.5, icon: '🔴' },
+        { name: 'SGPT/ALT', unit: 'U/L', regex: new RegExp(`(?:sgpt|alt)${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 7, normalMax: 56, icon: '🫁' },
+        { name: 'SGOT/AST', unit: 'U/L', regex: new RegExp(`(?:sgot|ast)${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 10, normalMax: 40, icon: '🫁' },
+        { name: 'Bilirubin', unit: 'mg/dL', regex: new RegExp(`bilirubin${SEP}(\\d+\\.?\\d*)`, 'i'), normalMin: 0.1, normalMax: 1.2, icon: '🟡' },
     ];
 
-    // Blood Pressure (special - two numbers)
-    const bpMatch = t.match(/(?:blood\s*pressure|bp|systolic)[:\s/]*(\d{2,3})\s*[/\\]\s*(\d{2,3})/i) ||
+    // Blood Pressure (special - two numbers) — flexible for OCR
+    const bpMatch = t.match(/(?:blood\s*pressure|bp|systolic|b\.?p)[\s:=\-–]*(\d{2,3})\s*[/\\]\s*(\d{2,3})/i) ||
                      t.match(/(\d{2,3})\s*[/\\]\s*(\d{2,3})\s*(?:mm\s*hg|mmhg)/i);
     if (bpMatch) {
         const sys = parseFloat(bpMatch[1]), dia = parseFloat(bpMatch[2]);

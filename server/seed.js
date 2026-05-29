@@ -129,14 +129,49 @@ async function seed() {
     });
   });
 
-  const sampleAppointments = sampleReviews.slice(0, 20).map((review, i) => ({
-    patientName: review.patientName, hospitalId: review.hospitalId, hospitalName: review.hospitalName,
-    originalDoctor: 'Auto-assigned',
-    assignedDoctor: seniorDoctors.find(d => d.hospitalId === review.hospitalId)?.name || 'Dr. General',
-    assignedDoctorId: `senior_${String((i % seniorDoctors.length) + 1).padStart(3, '0')}`,
-    handlingType: 'senior', time: review.createdAt, status: i < 14 ? 'completed' : 'booked',
-    createdAt: review.createdAt, updatedAt: review.createdAt
-  }));
+  // Build appointments with proper doctorSpecialization from the assigned doctor
+  const sampleAppointments = sampleReviews.slice(0, 20).map((review, i) => {
+    const doctor = seniorDoctors.find(d => d.hospitalId === review.hospitalId);
+    return {
+      patientName: review.patientName, hospitalId: review.hospitalId, hospitalName: review.hospitalName,
+      originalDoctor: 'Auto-assigned',
+      assignedDoctor: doctor?.name || 'Dr. General',
+      assignedDoctorId: `senior_${String((i % seniorDoctors.length) + 1).padStart(3, '0')}`,
+      doctorSpecialization: doctor?.specialization || 'General',
+      handlingType: 'senior', time: review.createdAt, status: i < 14 ? 'completed' : 'booked',
+      createdAt: review.createdAt, updatedAt: review.createdAt
+    };
+  });
+
+  // Additional disease-specific treated patients (all completed, real specializations)
+  const diseasePatients = [
+    { patientName: 'Arjun Mehta', hospitalId: 'hosp_001', hospitalName: 'Apollo Hospitals Bannerghatta', assignedDoctor: 'Dr. Arun Sharma', doctorSpecialization: 'Cardiologist', status: 'completed', createdAt: '2026-03-10T09:00:00Z' },
+    { patientName: 'Lakshmi Devi', hospitalId: 'hosp_012', hospitalName: 'Jayadeva Institute of Cardiology', assignedDoctor: 'Dr. Vivek Krishnan', doctorSpecialization: 'Cardiac Surgeon', status: 'completed', createdAt: '2026-03-12T10:00:00Z' },
+    { patientName: 'Ramesh Gupta', hospitalId: 'hosp_008', hospitalName: 'Aster CMI Hospital', assignedDoctor: 'Dr. Neha Jain', doctorSpecialization: 'Cardiologist', status: 'completed', createdAt: '2026-02-20T08:30:00Z' },
+    { patientName: 'Sunita Bose', hospitalId: 'hosp_011', hospitalName: 'Vikram Hospital Millers Road', assignedDoctor: 'Dr. Arun Sharma', doctorSpecialization: 'Cardiologist', status: 'completed', createdAt: '2026-01-15T11:00:00Z' },
+    { patientName: 'Kiran Rao', hospitalId: 'hosp_005', hospitalName: 'Columbia Asia Hospital Hebbal', assignedDoctor: 'Dr. Anita Deshmukh', doctorSpecialization: 'Oncologist', status: 'completed', createdAt: '2026-03-05T14:00:00Z' },
+    { patientName: 'Fatima Sheikh', hospitalId: 'hosp_001', hospitalName: 'Apollo Hospitals Bannerghatta', assignedDoctor: 'Dr. Anita Deshmukh', doctorSpecialization: 'Oncologist', status: 'completed', createdAt: '2026-02-18T09:30:00Z' },
+    { patientName: 'Deepak Verma', hospitalId: 'hosp_005', hospitalName: 'Columbia Asia Hospital Hebbal', assignedDoctor: 'Dr. Anita Deshmukh', doctorSpecialization: 'Oncologist', status: 'completed', createdAt: '2026-01-22T16:00:00Z' },
+    { patientName: 'Meera Nambiar', hospitalId: 'hosp_001', hospitalName: 'Apollo Hospitals Bannerghatta', assignedDoctor: 'Dr. Priya Patel', doctorSpecialization: 'Neurologist', status: 'completed', createdAt: '2026-03-18T10:30:00Z' },
+    { patientName: 'Suresh Iyer', hospitalId: 'hosp_011', hospitalName: 'Vikram Hospital Millers Road', assignedDoctor: 'Dr. Priya Patel', doctorSpecialization: 'Neurologist', status: 'completed', createdAt: '2026-02-25T08:00:00Z' },
+    { patientName: 'Anjali Sharma', hospitalId: 'hosp_003', hospitalName: 'Narayana Health City', assignedDoctor: 'Dr. Priya Patel', doctorSpecialization: 'Neurologist', status: 'completed', createdAt: '2026-01-10T13:00:00Z' },
+    { patientName: 'Prakash Shetty', hospitalId: 'hosp_002', hospitalName: 'Fortis Hospital Bannerghatta Road', assignedDoctor: 'Dr. Rajesh Kumar', doctorSpecialization: 'Orthopedic Surgeon', status: 'completed', createdAt: '2026-03-22T09:00:00Z' },
+    { patientName: 'Nirmala Hegde', hospitalId: 'hosp_009', hospitalName: 'Sparsh Hospital Yeshwanthpur', assignedDoctor: 'Dr. Rajesh Kumar', doctorSpecialization: 'Orthopedic Surgeon', status: 'completed', createdAt: '2026-02-14T11:30:00Z' },
+    { patientName: 'Mohan Das', hospitalId: 'hosp_002', hospitalName: 'Fortis Hospital Bannerghatta Road', assignedDoctor: 'Dr. Rajesh Kumar', doctorSpecialization: 'Orthopedic Surgeon', status: 'completed', createdAt: '2026-01-28T15:00:00Z' },
+    { patientName: 'Divya Menon', hospitalId: 'hosp_006', hospitalName: 'Sakra World Hospital', assignedDoctor: 'Dr. Karthik Nair', doctorSpecialization: 'Pulmonologist', status: 'completed', createdAt: '2026-03-08T10:00:00Z' },
+    { patientName: 'Rajendra Patil', hospitalId: 'hosp_005', hospitalName: 'Columbia Asia Hospital Hebbal', assignedDoctor: 'Dr. Karthik Nair', doctorSpecialization: 'Pulmonologist', status: 'completed', createdAt: '2026-02-05T14:30:00Z' },
+    { patientName: 'Kavya Reddy', hospitalId: 'hosp_008', hospitalName: 'Aster CMI Hospital', assignedDoctor: 'Dr. Neha Jain', doctorSpecialization: 'Nephrologist', status: 'completed', createdAt: '2026-03-15T08:00:00Z' },
+    { patientName: 'Tarun Bhat', hospitalId: 'hosp_003', hospitalName: 'Narayana Health City', assignedDoctor: 'Dr. Neha Jain', doctorSpecialization: 'Nephrologist', status: 'completed', createdAt: '2026-02-28T12:00:00Z' },
+    { patientName: 'Priya Kulkarni', hospitalId: 'hosp_004', hospitalName: 'Manipal Hospital Old Airport Road', assignedDoctor: 'Dr. Sanjay Gupta', doctorSpecialization: 'Dermatologist', status: 'completed', createdAt: '2026-03-20T09:30:00Z' },
+    { patientName: 'Anil Gowda', hospitalId: 'hosp_004', hospitalName: 'Manipal Hospital Old Airport Road', assignedDoctor: 'Dr. Sanjay Gupta', doctorSpecialization: 'Dermatologist', status: 'completed', createdAt: '2026-01-18T11:00:00Z' },
+    { patientName: 'Rekha Bhat', hospitalId: 'hosp_007', hospitalName: 'BGS Gleneagles Global Hospital', assignedDoctor: 'Dr. Lakshmi Menon', doctorSpecialization: 'ENT Specialist', status: 'completed', createdAt: '2026-03-25T10:00:00Z' },
+    { patientName: 'Vinod Nair', hospitalId: 'hosp_007', hospitalName: 'BGS Gleneagles Global Hospital', assignedDoctor: 'Dr. Lakshmi Menon', doctorSpecialization: 'ENT Specialist', status: 'completed', createdAt: '2026-02-10T14:00:00Z' },
+    { patientName: 'Shweta Joshi', hospitalId: 'hosp_002', hospitalName: 'Fortis Hospital Bannerghatta Road', assignedDoctor: 'Dr. Sunita Reddy', doctorSpecialization: 'Gynecologist', status: 'completed', createdAt: '2026-03-14T09:00:00Z' },
+    { patientName: 'Padma Rao', hospitalId: 'hosp_002', hospitalName: 'Fortis Hospital Bannerghatta Road', assignedDoctor: 'Dr. Sunita Reddy', doctorSpecialization: 'Gynecologist', status: 'completed', createdAt: '2026-02-22T10:30:00Z' },
+    { patientName: 'Shalini Kapoor', hospitalId: 'hosp_003', hospitalName: 'Narayana Health City', assignedDoctor: 'Dr. Meena Iyer', doctorSpecialization: 'Pediatrician', status: 'completed', createdAt: '2026-03-28T08:00:00Z' },
+    { patientName: 'Ravi Prasad', hospitalId: 'hosp_003', hospitalName: 'Narayana Health City', assignedDoctor: 'Dr. Meena Iyer', doctorSpecialization: 'Pediatrician', status: 'completed', createdAt: '2026-01-30T15:00:00Z' },
+    { patientName: 'Geeta Sharma', hospitalId: 'hosp_003', hospitalName: 'Narayana Health City', assignedDoctor: 'Dr. Venkat Rao', doctorSpecialization: 'General Surgeon', status: 'completed', createdAt: '2026-03-02T11:00:00Z' },
+  ].map(p => ({ ...p, originalDoctor: 'Auto-assigned', assignedDoctorId: 'senior_001', handlingType: 'senior', updatedAt: p.createdAt }));
 
   console.log('👨‍⚕️ Adding senior doctors...');
   for (let i = 0; i < seniorDoctors.length; i++) {
@@ -152,7 +187,8 @@ async function seed() {
 
   console.log('📅 Adding sample appointments...');
   for (const appt of sampleAppointments) { await db.collection('appointments').add(appt); }
-  console.log(`   ✅ Added ${sampleAppointments.length} sample appointments`);
+  for (const appt of diseasePatients) { await db.collection('appointments').add(appt); }
+  console.log(`   ✅ Added ${sampleAppointments.length + diseasePatients.length} sample appointments`);
 
   console.log('⭐ Adding sample reviews...');
   for (const review of sampleReviews) { await db.collection('reviews').add(review); }

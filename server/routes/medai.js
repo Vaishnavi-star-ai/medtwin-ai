@@ -60,33 +60,55 @@ router.post('/upload-report', upload.single('document'), async (req, res) => {
 
     console.log(`✅ Extracted ${extractedText.length} chars from ${fileName}`);
 
-    // Step 2: Risk detection
+    // Step 2: Risk detection — expanded for all medical documents
     const textLower = extractedText.toLowerCase();
-    const riskKeywords = ['high bp', 'high blood pressure', 'hypertension', 'high sugar', 'diabetes',
-      'low hemoglobin', 'anemia', 'critical', 'emergency', 'abnormal', 'elevated', 'low platelet'];
-    const isCritical = riskKeywords.some(k => textLower.includes(k));
+    const criticalKeywords = ['critical', 'emergency', 'life threatening', 'icu', 'ventilator'];
+    const riskKeywords = ['high risk', 'high bp', 'high blood pressure', 'hypertension', 'high sugar',
+      'diabetes', 'low hemoglobin', 'anemia', 'abnormal', 'elevated', 'low platelet',
+      'referral', 'higher referral', 'complication', 'surgery', 'tumor', 'cancer',
+      'malignant', 'fracture', 'infection', 'sepsis'];
+    const isCritical = criticalKeywords.some(k => textLower.includes(k));
 
-    // Step 3: Health score calculation
-    let healthScore = 100;
-    const deductions = [
-      { pattern: /high bp|high blood pressure|hypertension/i, points: 15 },
-      { pattern: /high sugar|diabetes|high glucose|elevated glucose/i, points: 20 },
-      { pattern: /high cholesterol|elevated cholesterol|high ldl/i, points: 15 },
-      { pattern: /low hemoglobin|anemia|low hb/i, points: 10 },
-      { pattern: /critical|emergency|urgent/i, points: 25 },
-      { pattern: /abnormal|elevated|out of range/i, points: 8 },
-      { pattern: /low platelet|thrombocytopenia/i, points: 12 },
-    ];
-    deductions.forEach(({ pattern, points }) => {
-      if (pattern.test(textLower)) healthScore -= points;
-    });
-    healthScore = Math.max(10, Math.min(100, healthScore));
-
-    // Step 4: AI Analysis
-    const analysis = await aiModule.analyzeReport(sessionId, extractedText);
-
-    // Step 5: Extract vitals
+    // Step 3: Extract vitals FIRST (needed for score)
     const vitals = aiModule.extractVitals(extractedText);
+
+    // Step 4: Health score from ACTUAL extracted vitals + text risk analysis
+    let healthScore = 100;
+    if (vitals.length > 0) {
+      vitals.forEach(v => {
+        if (v.status === 'high') healthScore -= 12;
+        else if (v.status === 'low') healthScore -= 8;
+      });
+    }
+    // ALWAYS check text for risk keywords (even when vitals exist)
+    const scoreDeductions = [
+      { pattern: /high\s*risk/i, points: 20 },
+      { pattern: /higher\s*referral|refer.*specialist|refer.*hospital/i, points: 15 },
+      { pattern: /high bp|high blood pressure|hypertension/i, points: 15 },
+      { pattern: /high sugar|diabetes|diabetic|high glucose/i, points: 20 },
+      { pattern: /high cholesterol|elevated cholesterol/i, points: 15 },
+      { pattern: /low hemoglobin|anemia|anaemia/i, points: 10 },
+      { pattern: /critical|emergency|urgent|immediate/i, points: 25 },
+      { pattern: /abnormal|elevated|out of range/i, points: 8 },
+      { pattern: /surgery|operate|operation/i, points: 12 },
+      { pattern: /tumor|cancer|malignant|carcinoma/i, points: 25 },
+      { pattern: /fracture|broken bone/i, points: 10 },
+      { pattern: /infection|sepsis|septic/i, points: 15 },
+      { pattern: /complication|complicated/i, points: 10 },
+      { pattern: /pregnant.*risk|risk.*pregnan/i, points: 15 },
+    ];
+    scoreDeductions.forEach(({ pattern, points }) => {
+      if (pattern.test(textLower)) {
+        console.log(`  ⚠️ Risk match: ${pattern} → -${points} pts`);
+        healthScore -= points;
+      }
+    });
+    if (isCritical) healthScore -= 10;
+    healthScore = Math.max(10, Math.min(100, healthScore));
+    console.log(`📊 Final health score: ${healthScore} (vitals: ${vitals.length})`);
+
+    // Step 5: AI Analysis (pass vitals for context)
+    const analysis = await aiModule.analyzeReport(sessionId, extractedText, vitals);
 
     console.log(`🧠 Analysis complete for ${fileName} — Score: ${healthScore}, Vitals: ${vitals.length}`);
 

@@ -52,4 +52,9 @@ export const aiAPI = {
   recommendHospitals: (data) => API.post('/ai/recommend-hospitals', data)
 };
 
+// Unified Search API
+export const searchAPI = {
+  search: (query) => API.get('/search', { params: { q: query } })
+};
+
 export default API;

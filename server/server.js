@@ -31,6 +31,9 @@ app.use('/api/ai', require('./routes/ai'));
 // Routes — MedTwin AI (PDF Analysis, Chat, Prescriptions)
 app.use('/api/medai', require('./routes/medai'));
 
+// Routes — Unified Search
+app.use('/api/search', require('./routes/search'));
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({
